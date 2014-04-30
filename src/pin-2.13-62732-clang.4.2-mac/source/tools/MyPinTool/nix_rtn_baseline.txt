@@ -1,0 +1,3 @@
+FILE* fopen(char* fn, const* mode);
+VOID printf(char* str, char* opts);
+int fclose(FILE* f);
