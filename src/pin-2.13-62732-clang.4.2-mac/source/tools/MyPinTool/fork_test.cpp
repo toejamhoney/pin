@@ -12,6 +12,7 @@ int add2( int x , int y ){
 
 
 int main(){
+    
     printf( "\ngood day\n" );
     int r = add2( 2, 3 );
     printf( "address of r=%p\n" , &r );
@@ -37,12 +38,17 @@ int main(){
         else
         {
             FILE * F = fopen( "testparent.txt", "w");
+            printf("Parent opens");
             fprintf(F, "line written by test.cpp parent\n");
             fclose( F );
-            printf("Parent Waits...");
+            printf("Parent Waits...\n");
             wait(&wait_status);
             printf("Parent done\n");
         }
     #endif
+
+    printf("START");
+    printf("MIDDLE\n");
+    printf("END");
 }
     
