@@ -16,7 +16,9 @@ bar = """printf("HELLO FROM BAR!!!\\n");
         printf("HELLO AGAIN! FROM BAR!!!\\n");
 """
 
-fopen_start = """printf("FOPEN going to be called with: %s\\n", (char*)X0);"""
+fopen_start = """printf("FOPEN going to be called with: %s\\n", (char*)*X0);
+*X0=NEW_FILENAME;
+printf("FOPEN now going to be called with: %s\\n", (char*)*X0);"""
 fopen_done = """printf("FOPEN has been called\\n");"""
 open_closed = """printf("FOPEN -> FCLOSE: A file was opened and closed\\n");"""
 
@@ -44,7 +46,7 @@ CALLOUTS = { 'DbgPrintEx' : {
     'fopen' : {
         'preflag': 4,
         'postflag': -4,
-        'global':'',
+        'global': 'char NEW_FILENAME[]="MaliciousFile.txt";',
         'pre':'\n\t'.join( [ 'TraceFile << "CALL-OUT ENTER <ACTION: OPEN-FILE>: " << name << " ( path=" << hex << (char *)X0 << ", mode=" << (char*)X1 << ")" << dec << endl;' ] ),
         'post':'\n\t'.join( [ 'TraceFile << "CALL-OUT EXIT: "<< name << " RETURN-VALUE @:" << hex << ret << dec << " RETURN-VALUE-INTERP:" << dec << ((int) ret) << endl;', ] )
         },

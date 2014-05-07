@@ -21,7 +21,8 @@ POSTHOOK = None
 TOOL_TEMPLATE = None
 SEQ_TEMPLATE = None
 INJECT_INST = None
-INJECT_FUNCARG = None
+INJECT_FUNCARG_VAL = None
+INJECT_FUNCARG_REF = None
 GENERATED_HDR = "/* Begin generated code by ER python module {date}*/".format(date=datetime.now().strftime("%A, %d. %B %Y %I:%M%p"))
 GENERATED_FTR = "/* End generated code by ER python module */"
 PUSH_MACRO = "PUSH({0})"
@@ -172,7 +173,10 @@ class Hook(object):
     def formalize_params(self, params):
         formals_list = []
         for idx, param in enumerate(params):
-            formals_list.append("%s X%s " % ("void *", idx))
+            if self.func_name == 'fopen':
+                formals_list.append("%s X%s " % ("void **", idx))
+            else:
+                formals_list.append("%s X%s " % ("void *", idx))
         return ', '.join(formals_list)
 
     def create_baseline(self, params):
@@ -273,7 +277,10 @@ def gen_analysis(func_sigs):
     hook_conditions.append(GENERATED_HDR)
 
     for func_rv, func_stub, func_params in func_sigs:
-        inject_args = "".join( [ INJECT_FUNCARG.format(count=cnt) for cnt in range(len(func_params)) ] )
+        if(func_stub == 'fopen'):
+            inject_args = "".join( [ INJECT_FUNCARG_REF.format(count=cnt) for cnt in range(len(func_params)) ] )
+        else:
+            inject_args = "".join( [ INJECT_FUNCARG_VAL.format(count=cnt) for cnt in range(len(func_params)) ] )
         hook_conditions.append(INJECT_INST.format(func_name = func_stub, func_args = inject_args))
 
     hook_conditions.append(GENERATED_FTR)
@@ -371,6 +378,7 @@ if __name__ == "__main__":
         TOOL_TEMPLATE=templates.TOOL_TEMPLATE
         SEQ_TEMPLATE=templates.SEQUENCE_TEMPLATE
         INJECT_INST=templates.INJECT_INST
-        INJECT_FUNCARG = templates.INJECT_FUNCARG
+        INJECT_FUNCARG_VAL = templates.INJECT_FUNCARG_VAL
+        INJECT_FUNCARG_REF = templates.INJECT_FUNCARG_REF
 
     process(args.out, args.rtn, args.inst, args.img, args.split)

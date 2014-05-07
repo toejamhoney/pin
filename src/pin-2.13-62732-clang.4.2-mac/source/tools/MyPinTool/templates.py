@@ -68,8 +68,10 @@ INJECT_INST="""
                     RTN_Close(rtn);
                 }}
 """
-INJECT_FUNCARG="""
+INJECT_FUNCARG_VAL="""
                                    IARG_FUNCARG_ENTRYPOINT_VALUE, {count},"""
+INJECT_FUNCARG_REF="""
+                                   IARG_FUNCARG_ENTRYPOINT_REFERENCE, {count},"""
 
 SEQUENCE_TEMPLATE="""
 void accept(int pattern_index);
