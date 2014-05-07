@@ -1,19 +1,32 @@
-PREHOOK=""" VOID pre_%s(CHAR * name, %s) { /* *  Function: %s *  Input parameters: %s */ /* BASELINE */ TraceFile << "PRE CALL-OUT (PID:"<< PID << ",TID:" << TID << "): " << name << " ("<< %s <<") " << dec << endl; 
+PREHOOK="""
+VOID pre_{func_name}(CHAR * name, {params})
+{{
+
+    /* 
+     * Function: {func_name}
+     * Input parameters: {doc_params}
+     */
+
+    /*
+     * BASELINE
+     */
+    TraceFile << "PRE CALL-OUT (PID:"<< PID << ",TID:" << TID << "): " << name << " ("<< {baseline} <<") " << dec << endl; 
+
     /* Callout Code if any */
-    %s
+    {callout_code}
 
     /* Sequence Interaction */
-    %s
-}
+    {sequence_code}
+}}
 """
 
 POSTHOOK="""
-VOID post_%s(CHAR * name, ADDRINT ret)
-{
+VOID post_{func_name}(CHAR * name, ADDRINT ret)
+{{
 
     /* 
-     *  Function: %s 
-     *  Input parameters: %s
+     *  Function: {func_name} 
+     *  Input parameters: {doc_params}
      */
 
     /* 
@@ -22,73 +35,129 @@ VOID post_%s(CHAR * name, ADDRINT ret)
     TraceFile << "POST CALL-OUT (PID:"<<PID<<",TID:"<<TID<<"): "<< name << " RETURN-VALUE @:" << hex << ret << dec << " RETURN-VALUE-INTERP:" << dec << ((int) ret ) << endl; 
     
     /* Callout Code if any */
-    %s
+    {callout_code}
 
     /* Sequence Interaction */
-    %s
-}
-"""
-
-SEQ_SUFFIX_SEARCH = """
-        if(RE_match("%s", %s))
-        {
-            %s
-        }
-        else
-        {
-            %s
-        }
-"""
-
-SEQUENCE_APPENDIX="""
-        char buffer[FLAG_SIZE+2];
-
-        #ifdef _WIN32
-            _snprintf_s(buffer, FLAG_SIZE+2, FLAG_SIZE+2, "|%-{flag_len}s", "{flag}"); 
-        #else
-            snprintf(buffer, FLAG_SIZE+2, "|%-{flag_len}s", "{flag}");
-        #endif
-
-        callout_str.append(buffer);
-        //callout_seq[tic] = ;
-        callout_cnt[tic] = icount;
-        tic++;
-        check_seq();
+    {sequence_code}
+}}
 """
 
 
-INJECT_INST_1="""
-                if (rtn_match(R1, "_%s")) {
+INJECT_INST="""
+                if (rtn_match(R1, "_{func_name}"))
+                {{
                     RTN_Open(rtn);
-                    RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)pre_%s,
-                                   IARG_ADDRINT, "%s","""
-
-INJECT_INST_2="""
-                                   IARG_FUNCARG_ENTRYPOINT_VALUE, %i,"""
-INJECT_INST_3="""
+                    RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)pre_{func_name},
+                                   IARG_ADDRINT, "{func_name}",{func_args}
                                    IARG_END);
-"""
-INJECT_INST_4="""
-                    RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)post_%s,
-                                   IARG_ADDRINT, "%s", 
+                    RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)post_{func_name},
+                                   IARG_ADDRINT, "{func_name}", 
                                    IARG_FUNCRET_EXITPOINT_VALUE,
                                    IARG_END);
                     if(REPORT_MERGING)
-                    {
-                        printf("Added pre and post hooks to: %s\\n");
-                    }
+                    {{
+                        printf("Added pre and post hooks to: {func_name}\\n");
+                    }}
                     if(KnobSelectMem)
-                    {
+                    {{
                        for(INS curr=RTN_InsHead(rtn); INS_Valid(curr); curr=INS_Next(curr))
-                       {
+                       {{
                            instrument_mem(curr);
-                       }
-                    }
+                       }}
+                    }}
                     RTN_Close(rtn);
-                }
+                }}
+"""
+INJECT_FUNCARG="""
+                                   IARG_FUNCARG_ENTRYPOINT_VALUE, {count},"""
+
+SEQUENCE_TEMPLATE="""
+void accept(int pattern_index);
+
+#define ACCEPT(K) if(t->step == t->goal) {{ return K; }} else {{ return 0; }}
+
+#define PUSH(K) if(PATTERNS[K]){{ get_tail(PATTERNS[K])->next = new_clause(K); }} else{{ PATTERNS[K]=new_clause(K); }}
+
+#define TRANS(K, S) if(PATTERNS[K]){{ t=PATTERNS[K]; window_size = P_WND[K]; while(t){{ if(t->step==S){{ t->step++; }} ACCEPT(K) t=t->next; }} }}
+
+int CLOCK = 0;
+struct cnode **PATTERNS = NULL;
+#define P_NUM {p_num}
+int P_LEN[P_NUM] = {lengths};
+int P_WND[P_NUM] = {windows};
+
+struct cnode
+{{
+    // Which step in the pattern the clause is 
+    int step;
+    // Which step is the goal
+    int goal;
+    // Clock time for this clause's creation
+    int start;
+    // Clock + Window => This clause is invalid
+    int expire;
+    // Next clause of the same pattern
+    struct cnode * next ;
+}};
+
+struct cnode * new_clause (int p_idx)
+{{
+    struct cnode * x = (struct cnode *) malloc(sizeof(struct cnode));
+    x->start = CLOCK;
+    x->expire = CLOCK + P_WND[p_idx];
+    x->step = 0;
+    x->goal = P_LEN[p_idx] - 1;
+    x->next = NULL;
+    return x;
+}}
+
+struct cnode * get_tail( struct cnode * Y )
+{{
+    struct cnode * rv = Y;
+    while(rv->next)
+    {{
+        rv = rv->next;
+    }}
+    return rv;
+}}
+
+void init_cnode_array()
+{{
+    int k;
+    PATTERNS = (struct cnode **) malloc(sizeof(struct cnode*) * P_NUM);
+    for (k = 0; k < P_NUM ; k ++)
+    {{
+        PATTERNS[k] = NULL;
+    }}
+}}
+
+int fast_push_code (int code)
+{{
+    struct cnode * t;
+    int window_size = 0;
+    int k = 0;
+    for (k = 0; k < P_NUM ; k++)
+    {{
+        t = PATTERNS[k];
+        while(t && ( (t->expire < CLOCK) || (t->step >= t->goal) ) )
+        {{
+            t = t->next;
+            free(PATTERNS[k]);
+            PATTERNS[k] = t;
+        }}
+    }}
+
+    switch(code)
+    {{
+    {cases}
+    }}
+
+    return 0;
+}}
 """
 
-TEMPLATE_p1="""
+
+TOOL_TEMPLATE="""
 
 /* ****** ****** ****** ****** ****** ****** ****** ****** ****** ******
 
@@ -121,9 +190,9 @@ TEMPLATE_p1="""
 #ifdef _WIN32
     // This will also fire on 64 bit Windows
     namespace WINDOWS
-    {
+    {{
         #include <Windows.h>
-    }
+    }}
     #include<io.h>
     #include<WinDef.h>
     #include<WinNT.h>
@@ -141,20 +210,20 @@ TEMPLATE_p1="""
 
     /* Structs to access object attributes pointers in syscalls */
 
-    typedef struct _UNICODE_STRING {
+    typedef struct _UNICODE_STRING {{
             USHORT Length;
             USHORT MaximumLength;
             PWSTR Buffer;
-    } UNICODE_STRING, *PUNICODE_STRING;
+    }} UNICODE_STRING, *PUNICODE_STRING;
 
-    typedef struct _OBJECT_ATTRIBUTES {
+    typedef struct _OBJECT_ATTRIBUTES {{
             ULONG	Length;
             HANDLE RootDirectory;
             PUNICODE_STRING ObjectName;
             ULONG Attributes;
             PVOID SecurityDescriptor;
             PVOID SecurityQualityOfService;
-    } OBJECT_ATTRIBUTES, *POBJECT_ATTRIBUTES;
+    }} OBJECT_ATTRIBUTES, *POBJECT_ATTRIBUTES;
 #else
     #include <unistd.h>
 #endif
@@ -194,11 +263,9 @@ TEMPLATE_p1="""
 /* Global Variables */
 /* ===================================================================== */
 
-#define FLAG_LEN 16 * 8
 #define TICUB 2048 
 #define PID LEVEL_PINCLIENT::PIN_GetPid()
 #define TID LEVEL_PINCLIENT::PIN_ThreadId()
-#define FLAG_SIZE %s
 
 UINT64 icount = 0;
 UINT64 slp_count = 0;  //codelet count.
@@ -207,14 +274,6 @@ int call_stack_depth = 0;
 string invalid = "UNKNOWN-SYM";
 int REPORT_MERGING = 1;
 UINT64 ticount[TICUB];
-
-/* For Callout Sequences and Regex Matching */
-string callout_str;
-//callout_str.reserve(10000 * (8 * FLAG_SIZE));
-char callout_seq[1024 << 10] = { };
-//u_int64_t callout_cnt[1024 << 10] = { };
-UINT64 callout_cnt[1024 << 10] = { };
-int tic = 0;
 
 /* For Memory Instrumentation */
 static VOID * WriteAddr;
@@ -225,77 +284,43 @@ static INT32 WriteSize;
 /* Util Functions */
 /* ===================================================================== */
 
-bool RE_match(const char* re_str, int suff_len)
-{
-    int ret_val = 0;
-
-    #ifdef ENVMACOS
-        regex_t re;
-        ret_val = regcomp(&re, re_str, REG_EXTENDED);
-        if(ret_val) {
-            cerr << "Could not compile: " << re_str << endl;
-            return false;
-        }
-    #else
-        std::regex re(re_str);
-
-    #endif
-
-    //char* suffix = callout_seq + tic - suff_len;
-    const char* suffix = callout_str.c_str();// + tic - suff_len;
-    if(suffix < callout_str.c_str() || suffix > callout_str.c_str() + tic) {
-        suffix = callout_str.c_str();
-    }
-    
-    #ifdef ENVMACOS
-        ret_val = regexec(&re, suffix, 0, NULL, 0);
-        if(ret_val) {
-            TraceFile << "Search Fail(regex.h). Searched Suffix: " << suffix << endl;
-        }
-    #else
-        ret_val = std::regex_match(suffix, re);
-        if(!ret_val) {
-            TraceFile << "Search Fail(c++ regex). Searched Suffix: " << suffix << endl;
-        }
-    #endif
-
-    return ret_val;
-}
-
-/* Checks sequences, called from pre and post hooks */
-void check_seq()
-{
-    %s
-}
-
 int rtn_match(string a, string b)
-{
-    return a == b;
-}
+{{
+    return a==b;
+}}
 
-VOID thread_init(){
+VOID thread_init(){{
     int t = 0;
-    for ( t = 0 ; t < TICUB ; t ++ ){
+    for ( t = 0 ; t < TICUB ; t ++ ){{
 	ticount[t] = 0;
-    }
-}
+    }}
+}}
 
-VOID do_count(ADDRINT X ){
+VOID do_count(ADDRINT X ){{
   icount++; 
   TraceFile << ":::[" << PID << "." << TID << "] " << dec << icount <<"\\t"<< hex << X << endl;
-}
+}}
 
-VOID string_report(const string *s){
+VOID string_report(const string *s){{
   TraceFile.write(s->c_str(), s->size());
-}
+}}
 
+
+/* ===================================================================== */
 /* Supporting global code from extras.py */
-"""
+/* ===================================================================== */
 
+{g_code}
 
-TEMPLATE_p1a="""
+/* ===================================================================== */
 /* done with supporting extras.py */
+/* ===================================================================== */
 
+/* ===================================================================== */
+/* Sequence Functions */
+/* ===================================================================== */
+
+{seq_code}
 
 /* ===================================================================== */
 /* Commandline Switches */
@@ -303,7 +328,7 @@ TEMPLATE_p1a="""
 
 
 KNOB<string> KnobOutputFile(KNOB_MODE_WRITEONCE, "pintool",
-    "o", "%s.out", "specify trace file name");
+    "o", "{log_name}.out", "specify trace file name");
 KNOB<BOOL>   KnobNoCompress(KNOB_MODE_WRITEONCE, "pintool",
     "no_compress", "0", "Do not compress");
 KNOB<BOOL> KnobSelectMem(KNOB_MODE_WRITEONCE, "pintool",
@@ -318,35 +343,31 @@ KNOB<BOOL> KnobAllMem(KNOB_MODE_WRITEONCE, "pintool",
 
 
 INT32 Usage()
-{
+{{
     cerr << "This tool produces a trace of calls to RtlAllocateHeap.";
     cerr << endl << endl;
     cerr << KNOB_BASE::StringKnobSummary();
     cerr << endl;
     return -1;
-}
+}}
 
 
 /* ===================================================================== */
-/* Analysis routines                                                     */
+/* Instrumenation                                                        */
 /* ===================================================================== */
-
-
-"""
-
-TEMPLATE_p2="""
-
+{i_code}
 /* ===================================================================== */
 /* Memory IO Recording Routines */
 /* ===================================================================== */
 
 
-static VOID EmitMem(VOID * ea, INT32 size){
+static VOID EmitMem(VOID * ea, INT32 size)
+{{
     if (!KnobAllMem || !KnobSelectMem)
         return;
     
     switch(size)
-    {
+    {{
       case 0:
         TraceFile << setw(1);
         break;
@@ -371,31 +392,34 @@ static VOID EmitMem(VOID * ea, INT32 size){
         TraceFile.unsetf(ios::showbase);
         TraceFile << setw(1) << "0x";
         for (INT32 i = 0; i < size; i++)
-        {
+        {{
             TraceFile << static_cast<UINT32>(static_cast<UINT8*>(ea)[i]);
-        }
+        }}
         TraceFile.setf(ios::showbase);
         break;
-    }
-}
+    }}
+}}
 
-static VOID RecordMem(VOID * ip, CHAR r, VOID * addr, INT32 size, BOOL isPrefetch){
+static VOID RecordMem(VOID * ip, CHAR r, VOID * addr, INT32 size, BOOL isPrefetch)
+{{
     TraceFile << "M\t" << ip << ": " << r << " " << setw(2+2*sizeof(ADDRINT)) << addr << " "
               << dec << setw(2) << size << " "
               << hex << setw(2+2*sizeof(ADDRINT));
     if (!isPrefetch)
         EmitMem(addr, size);
     TraceFile << endl;
-}
+}}
 
-static VOID RecordWriteAddrSize(VOID * addr, INT32 size){
+static VOID RecordWriteAddrSize(VOID * addr, INT32 size)
+{{
     WriteAddr = addr;
     WriteSize = size;
-}
+}}
 
-static VOID RecordMemWrite(VOID * ip){
+static VOID RecordMemWrite(VOID * ip)
+{{
     RecordMem(ip, 'W', WriteAddr, WriteSize, false);
-}
+}}
 
 
 /* ===================================================================== */
@@ -404,11 +428,11 @@ static VOID RecordMemWrite(VOID * ip){
 
 
 VOID instrument_mem(INS ins)
-{
+{{
     // instruments loads using a predicated call, i.e.
     // the call happens iff the load will be actually executed
     if (INS_IsMemoryRead(ins))
-    {
+    {{
         INS_InsertPredicatedCall(
             ins, IPOINT_BEFORE, (AFUNPTR)RecordMem,
             IARG_INST_PTR,
@@ -417,10 +441,10 @@ VOID instrument_mem(INS ins)
             IARG_MEMORYREAD_SIZE,
             IARG_BOOL, INS_IsPrefetch(ins),
             IARG_END);
-    }
+    }}
 
     if (INS_HasMemoryRead2(ins))
-    {
+    {{
         INS_InsertPredicatedCall(
             ins, IPOINT_BEFORE, (AFUNPTR)RecordMem,
             IARG_INST_PTR,
@@ -429,12 +453,12 @@ VOID instrument_mem(INS ins)
             IARG_MEMORYREAD_SIZE,
             IARG_BOOL, INS_IsPrefetch(ins),
             IARG_END);
-    }
+    }}
 
     // instruments stores using a predicated call, i.e.
     // the call happens iff the store will be actually executed
     if (INS_IsMemoryWrite(ins))
-    {
+    {{
         INS_InsertPredicatedCall(
             ins, IPOINT_BEFORE, (AFUNPTR)RecordWriteAddrSize,
             IARG_MEMORYWRITE_EA,
@@ -442,22 +466,22 @@ VOID instrument_mem(INS ins)
             IARG_END);
         
         if (INS_HasFallThrough(ins))
-        {
+        {{
             INS_InsertCall(
                 ins, IPOINT_AFTER, (AFUNPTR)RecordMemWrite,
                 IARG_INST_PTR,
                 IARG_END);
-        }
+        }}
         if (INS_IsBranchOrCall(ins))
-        {
+        {{
             INS_InsertCall(
                 ins, IPOINT_TAKEN_BRANCH, (AFUNPTR)RecordMemWrite,
                 IARG_INST_PTR,
                 IARG_END);
-        }
+        }}
         
-    }
-}
+    }}
+}}
 
 
 /* ===================================================================== */
@@ -465,16 +489,18 @@ VOID instrument_mem(INS ins)
 /* ===================================================================== */
 
 const string *Target2String(ADDRINT target)
-{
+{{
     string name = RTN_FindNameByAddress(target);
     if (name == "")
       return &invalid;
     else
       return new string(name);
-}
+}}
 
-VOID trace_instrument(TRACE trace, VOID *v){
-  for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl)){ 
+VOID trace_instrument(TRACE trace, VOID *v)
+{{
+  for (BBL bbl = TRACE_BblHead(trace); BBL_Valid(bbl); bbl = BBL_Next(bbl))
+  {{ 
     /* iterate over all basic blocks */
     
     string codelet_string = "";
@@ -485,9 +511,13 @@ VOID trace_instrument(TRACE trace, VOID *v){
     
     ADDRINT stage_entry = INS_Address( head );
     ADDRINT target = 0;
-    if (INS_IsCall(tail)){
-        if( INS_IsDirectBranchOrCall(tail)){
-            target = INS_DirectBranchOrCallTargetAddress(tail);}}
+    if (INS_IsCall(tail))
+    {{
+        if( INS_IsDirectBranchOrCall(tail))
+        {{
+            target = INS_DirectBranchOrCallTargetAddress(tail);
+        }}
+    }}
 
     INS cur ;
     int branch_id = slp_count;
@@ -496,7 +526,7 @@ VOID trace_instrument(TRACE trace, VOID *v){
      * the BBL once
      */
     if (!KnobNoCompress)
-    {
+    {{
       /* Instrument the head instruction right before it is called, and also
        * before we instrument the instructions in the basic block 
        */
@@ -504,39 +534,39 @@ VOID trace_instrument(TRACE trace, VOID *v){
       INS_InsertCall(head, IPOINT_BEFORE, AFUNPTR(string_report),
 		     IARG_PTR, new string(msg_pre),
 		     IARG_END);
-    }
+    }}
    
     /* Walk the list of instructions inside the BBL. Disassemble each, and add
      * it to the codelet string. Also, instrument each instruction at the
      * point before it is called with the do_count function.
      */
     for ( cur = head; INS_Valid( cur ); cur = INS_Next(cur ) )
-    {
+    {{
         cbs += sprintf( codelet_buffer + cbs , "\\n\\t@%llx\\t%s", INS_Address( cur ), INS_Disassemble( cur ).c_str() );
         INS_InsertCall(cur, IPOINT_BEFORE, (AFUNPTR)do_count, IARG_ADDRINT, INS_Address( cur ), IARG_END);
         if(KnobAllMem)
-        {
+        {{
             instrument_mem(cur);
-        }
-    }
+        }}
+    }}
 
     /* Finish off the codelet assembly string with an out message and
      * address ranges of the BBL
      */
-    cbs += sprintf( codelet_buffer + cbs , "\\n\\t}BBL.OUT [%d] %llx - %llx\\n", branch_id, INS_Address( head ), INS_Address( tail ));
+    cbs += sprintf( codelet_buffer + cbs , "\\n\\t}}BBL.OUT [%d] %llx - %llx\\n", branch_id, INS_Address( head ), INS_Address( tail ));
   
     /* If compression is turned on, output the codelet every single time we
      * hit the same block.
      */
     if(KnobNoCompress)
-    {
+    {{
         INS_InsertCall(tail, IPOINT_BEFORE, AFUNPTR(string_report),
 		     IARG_PTR, new string(codelet_buffer),
 		     IARG_END);
       slp_count ++;
-    }
+    }}
     else
-    {
+    {{
         /* add the mapped BBL to output */
         TraceFile.write(codelet_buffer, cbs);	
 
@@ -548,16 +578,16 @@ VOID trace_instrument(TRACE trace, VOID *v){
                      IARG_END);
 
         slp_count ++;
-    }
-  }
-}
+    }}
+  }}
+}}
 
 /* ===================================================================== */
 /* Image Mapping routines                                                */
 /* ===================================================================== */
 
 void report_sym_structure( SYM sym, int depth )
-{
+{{
   int k = 0;
   for ( k = 0; k< depth ; k ++ )
     TraceFile << "\\t" ; 
@@ -567,9 +597,10 @@ void report_sym_structure( SYM sym, int depth )
   string sym_2 = PIN_UndecorateSymbolName(SYM_Name(sym), UNDECORATION_COMPLETE );
   ADDRINT offset  = SYM_Value( sym );	
   TraceFile << hex << offset << " sym.1:" << sym_1 << " sym.2:" << sym_2 << "</SYM>" << endl;
-}
+}}
 
-void report_routine_structure( RTN rtn , int depth){
+void report_routine_structure( RTN rtn , int depth)
+{{
   string R1 = LEVEL_PINCLIENT::RTN_Name (rtn );  
   AFUNPTR R3 =LEVEL_PINCLIENT::RTN_Funptr (rtn);
   INT32 R4 = 	LEVEL_PINCLIENT::RTN_Id (rtn );
@@ -582,9 +613,10 @@ void report_routine_structure( RTN rtn , int depth){
   for ( k = 0; k< depth ; k ++ )
     TraceFile << "\\t" ; 
   TraceFile << "<ROUTINE> R1:" << R1 << " R2.1:" << r2_1 << " R2.2" << r2_2 << " R3:" << R3 << " R4:" << R4 << " R5:" << R5 << " R6:" << R6 << " R7:" << R7 << "</ROUTINE>" << endl;
-}
+}}
 
-void report_section_structure(SEC sec, int depth ){
+void report_section_structure(SEC sec, int depth )
+{{
   BOOL S1 = LEVEL_PINCLIENT::SEC_Valid (sec);
   string S2 = LEVEL_PINCLIENT::SEC_Name (sec);
   SEC_TYPE S3 = LEVEL_PINCLIENT::SEC_Type (sec);
@@ -597,7 +629,8 @@ void report_section_structure(SEC sec, int depth ){
   char sec_type[128];
   int k;
 
-  switch ( S3 ){
+  switch ( S3 )
+  {{
   case SEC_TYPE_REGREL :  	
     strcpy( sec_type, "relocations" );
     break;
@@ -625,25 +658,26 @@ void report_section_structure(SEC sec, int depth ){
   default: 
     strcpy( sec_type, "UNKNOWN" );    
     break;       
-  }
+  }}
   for ( k = 0; k< depth ; k ++ )
     TraceFile << "\t" ; 
   TraceFile << "<SECTION>S1:" << S1 << " S2:" << S2 << " S3:" << S3 << " S4:" << S4 << " S5:" << S5 << " S6:" << S6 << " S7:" << S7 << " S8:" << S8 << " S9:" << S9 << " Stype:" << sec_type << endl;
 
-  for( RTN rtn= SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn) ){
+  for( RTN rtn= SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn) )
+  {{
     report_routine_structure( rtn, depth + 1  );
-    string R1 = LEVEL_PINCLIENT::RTN_Name (rtn );  
-"""
+    string R1 = LEVEL_PINCLIENT::RTN_Name (rtn );
 
+    {a_code}
 
-TEMPLATE_p3="""                
-  }
+  }}
   for ( k = 0; k< depth ; k ++ )
     TraceFile << "\\t" ; 
   TraceFile << "</SECTION>" << endl;
-}
+}}
 
-void report_image_structure(IMG img, int depth){
+void report_image_structure(IMG img, int depth)
+{{
   UINT32 I1 = IMG_Id(img);
   string I2 = IMG_Name(img);
   int I3 = IMG_IsMainExecutable( img );
@@ -663,7 +697,8 @@ void report_image_structure(IMG img, int depth){
     TraceFile << "\t" ; 
   TraceFile << "<IMAGE-LOAD>" << " I1:" << I1 << " I2:" << I2 << " I3:" << I3 << " I4:" << I4 << " I5:" << hex<< I5 << " I6:"<< I6 << " I7:" << I7 << " I8:" << I8 << " I9:"<< I9  << " I10:"<< I10  << " I11:" << I11 ;
 
-  switch ( I12 ){
+  switch ( I12 )
+  {{
   case IMG_TYPE_STATIC:
     strcpy( I13 ,"static" ); break;
   case IMG_TYPE_SHARED:
@@ -681,26 +716,30 @@ void report_image_structure(IMG img, int depth){
         strcpy( I13 ,"dynamic-code" ); break;
   #endif
   default:
-    strcpy( I13 ,"UNKNOWN" ); break;      }
+    strcpy( I13 ,"UNKNOWN" ); break;
+  }}
 
   TraceFile << " I12:" << I12 << " I13:" << I13 << endl;
 
-  for( SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) ){
+  for( SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec) )
+  {{
     report_section_structure( sec, depth + 1   ); 
-  }
+  }}
 
   /* */
 
-  for (SYM sym = IMG_RegsymHead(img); SYM_Valid(sym); sym = SYM_Next(sym)){
+  for (SYM sym = IMG_RegsymHead(img); SYM_Valid(sym); sym = SYM_Next(sym))
+  {{
     report_sym_structure( sym, depth +1 );
-  }
+  }}
  
   for ( k = 0; k< depth ; k ++ )
     TraceFile << "\t" ; 
   TraceFile << "</IMAGE-LOAD>" << endl;
-}
+}}
 
-void report_image_structure_2(IMG img, int depth){
+void report_image_structure_2(IMG img, int depth)
+{{
   UINT32 I1 = IMG_Id(img);
   string I2 = IMG_Name(img);
   int I3 = IMG_IsMainExecutable( img );
@@ -720,7 +759,8 @@ void report_image_structure_2(IMG img, int depth){
     TraceFile << "\\t" ; 
   TraceFile << "<IMAGE-UNLOAD>" << " I1:" << I1 << " I2:" << I2 << " I3:" << I3 << " I4:" << I4 << " I5:" << hex<< I5 << " I6:"<< I6 << " I7:" << I7 << " I8:" << I8 << " I9:"<< I9  << " I10:"<< I10  << " I11:" << I11 ;
 
-  switch ( I12 ){
+  switch ( I12 )
+  {{
   case IMG_TYPE_STATIC:
     strcpy( I13 ,"static" ); break;
   case IMG_TYPE_SHARED:
@@ -738,7 +778,8 @@ void report_image_structure_2(IMG img, int depth){
         strcpy( I13 ,"dynamic-code" ); break;
   #endif
   default:
-    strcpy( I13 ,"UNKNOWN" ); break;      }
+    strcpy( I13 ,"UNKNOWN" ); break;      
+  }}
 
   TraceFile << " I12:" << I12 << " I13:" << I13 << endl;
   
@@ -746,49 +787,52 @@ void report_image_structure_2(IMG img, int depth){
     TraceFile << "\\t" ; 
   TraceFile << "</IMAGE-UNLOAD>" << endl;
     
-}
+}}
 
 VOID ImageLoad(IMG img, VOID *v)
-{
+{{
   report_image_structure(img, 0 );
-}
+}}
 
 VOID ImageUnLoad(IMG img, VOID *v )
-{
+{{
   report_image_structure_2(img, 0 );
-}
+}}
 
 /* ===================================================================== */
 
 VOID Fini(INT32 code, VOID *v)
-{
+{{
     TraceFile.close();
-}
+}}
 
 /* ===================================================================== */
 /* Process                                                               */
 /* ===================================================================== */
 
 BOOL FollowChild(CHILD_PROCESS childProcess, VOID * userData)
-{
+{{
     fprintf(stdout, "before child:%u\\n", PID);
     return TRUE;
-}        
+}}        
 
 /* ===================================================================== */
 /* Main                                                                  */
 /* ===================================================================== */
 
 int main(int argc, char *argv[])
-{
+{{
+    // Init sequence pattern array
+    init_cnode_array();
+
     // Initialize pin & symbol manager
     PIN_InitSymbols();
     if( PIN_Init(argc,argv) )
-    {
+    {{
         return Usage();
-    }
+    }}
     thread_init();
-    
+     
     PIN_AddFollowChildProcessFunction(FollowChild, 0);    
     
     // Write to a file since cout and cerr maybe closed by the application
@@ -805,7 +849,7 @@ int main(int argc, char *argv[])
     PIN_StartProgram();
     
     return 0;
-}
+}}
 
 /* ===================================================================== */
 /* eof */

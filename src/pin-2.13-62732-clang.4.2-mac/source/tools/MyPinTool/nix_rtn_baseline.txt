@@ -1,3 +1,6 @@
 FILE* fopen(char* fn, const* mode);
 VOID printf(char* str, char* opts);
 int fclose(FILE* f);
+int madeup(int num);
+int madeup2(int num, int num2);
+void madeup3();

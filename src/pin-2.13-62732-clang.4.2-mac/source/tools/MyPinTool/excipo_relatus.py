@@ -4,288 +4,373 @@
 
 This is our PIN TOOL for api tracing. (C) W.Casey, M.Appel
 
-Usage: excipo_relatus X.cpp 
-
 
 """
 import pprint
 import sys
-import getopt
+import argparse
 import templates
-import re
+from datetime import datetime
+from collections import OrderedDict
 
-TEMPLATE_p1=templates.TEMPLATE_p1
-TEMPLATE_p1a=templates.TEMPLATE_p1a
-TEMPLATE_p2=templates.TEMPLATE_p2
-TEMPLATE_p3=templates.TEMPLATE_p3
+extras = None
+CALLOUTS = {}
+SEQUENCES = None
+PREHOOK = None
+POSTHOOK = None
+TOOL_TEMPLATE = None
+SEQ_TEMPLATE = None
+INJECT_INST = None
+INJECT_FUNCARG = None
+GENERATED_HDR = "/* Begin generated code by ER python module {date}*/".format(date=datetime.now().strftime("%A, %d. %B %Y %I:%M%p"))
+GENERATED_FTR = "/* End generated code by ER python module */"
+PUSH_MACRO = "PUSH({0})"
+TRANS_MACRO = "TRANS({0}, {1})"
 
-PREHOOK=templates.PREHOOK
-POSTHOOK=templates.POSTHOOK
 
-INJECT_INST_1=templates.INJECT_INST_1
-INJECT_INST_2=templates.INJECT_INST_2
-INJECT_INST_3=templates.INJECT_INST_3
-INJECT_INST_4=templates.INJECT_INST_4
+class Sequences(object):
 
-SEQ_APP=templates.SEQUENCE_APPENDIX
+    def __init__(self, conf_map):
+        self.flags = set()
+        self.accept_states = set()
+        self.seqs = []
+        for key, val in conf_map.items():
+            seq = Sequence(key, val)
+            self.seqs.append(seq)
+            self.flags.update(seq.flags)
+        self.p_num = len(self.seqs)
+        self.DFA = SwitchCases(self.flags)
 
-MAX_FLAG_LEN = 1
+        print '-'*79
+        print 'Found Sequence Patterns:'
+        for idx, seq in enumerate(self.seqs):
+            print idx,':',seq.seq
+        print '-'*79
 
-def study_c_declaration( input_file ):
-    routine_data = [];
-    fin = open( input_file );
-    cur_routine=None;
-    record = 0;
-    for line in fin:
-        dec_ret_type, ws, dec_func_name_args = line.rstrip().partition(' ')
-        if dec_func_name_args:
-            routine_data.append( [dec_ret_type, dec_func_name_args] )
+    def init_DFA(self):
+        self.update_pushes()
+        self.update_transitions()
+        self.DFA.finalize()
+        print str(self.DFA)
+
+    def init_accepts(self):
+        for seq in self.seqs:
+            self.accept_states.add(seq.seq[-1])
+
+    def accepts(self, flag):
+        return flag in self.accept_states
+
+    def update_pushes(self):
+        accept_last = []
+        for p_idx, seq in enumerate(self.seqs):
+            if seq.length == 1:
+                self.DFA.add_last_line(seq.start_state, "return {0};".format(p_idx))
+            else:
+                self.DFA.add_line(seq.start_state, PUSH_MACRO.format(p_idx))
+
+    def update_transitions(self):
+        for p_idx, seq in enumerate(self.seqs):
+            for seq_step, flag in enumerate(seq.seq[1:]):
+                self.DFA.add_line(flag, TRANS_MACRO.format(p_idx, seq_step))
+
+    def get_lengths(self):
+        lens = '{'
+        for p_idx, seq in enumerate(self.seqs):
+            lens += str(seq.length)
+            if p_idx < len(self.seqs) - 1:
+                lens += ', '
+        lens += '}'
+        return lens
+
+    def get_windows(self):
+        windows = '{'
+        for p_idx, seq in enumerate(self.seqs):
+            windows += str(seq.window)
+            if p_idx < len(self.seqs) - 1:
+                windows += ', '
+        windows += '}'
+        return windows
+
+    def get_dfa(self):
+        return str(self.DFA)
+
+    def get_user_code(self, flag):
+        src_code = []
+        for p_idx, seq in enumerate(self.seqs):
+            if flag == seq.accept_state:
+                src_code.append(seq.inject_code)
+        return src_code
+
+    def get_accept_code(self, flag):
+        src_code = SwitchCases()
+        for p_idx, seq in enumerate(self.seqs):
+            if flag == seq.accept_state:
+                src_code.add_case(p_idx)
+                src_code.add_line(p_idx, seq.inject_code)
+        src_code.finalize()
+        return str(src_code)
+
+
+
+class Sequence(object):
+    
+    def __init__(self, seq_tuple, seq_settings):
+        self.flags = set()
+        self.code_id = seq_settings[0]
+        self.window = seq_settings[1]
+        self.seq = seq_tuple
+        self.start_state = seq_tuple[0]
+        self.accept_state = seq_tuple[-1]
+        self.inject_code = getattr(extras, self.code_id)
+        self.length = len(seq_tuple)
+        for flag in self.seq:
+            self.flags.add(flag)
+
+    def __str__(self):
+        return self.inject_code
+
+
+class SwitchCases(object):
+
+    def __init__(self, flag_set=[]):
+        self.cases = OrderedDict(zip(flag_set, [ [] for flag in flag_set]))
+        self.last_lines = {}
+
+    def add_case(self, case_id):
+        self.cases[case_id] = []
+
+    def add_line(self, case_id, line):
+        self.cases.get(case_id).append(line)
+
+    def add_last_line(self, case_id, line):
+        self.last_lines[case_id] = line
+
+    def finalize(self):
+        for idx,src in self.cases.items():
+            goes_last = self.last_lines.get(idx)
+            if goes_last:
+                src.append(goes_last)
+            src.append('break;')
+
+    def __str__(self):
+        s = ''
+        for key, val in self.cases.items():
+            s += '    case {k}:\n'.format(k=key)
+            for line in val:
+                s += '        {src}\n'.format(src=line)
+        s += '    default:\n        break;'
+        return s
+
+class Hook(object):
+    
+    def __init__(self, name, params):
+        self.func_name = name
+        self.doc_params = ",".join(params)
+        self.formals = self.formalize_params(params)
+        self.baseline = self.create_baseline(params)
+
+    def formalize_params(self, params):
+        formals_list = []
+        for idx, param in enumerate(params):
+            formals_list.append("%s X%s " % ("void *", idx))
+        return ', '.join(formals_list)
+
+    def create_baseline(self, params):
+        baseline = 'hex'
+        for cnt in range(len(params)):
+            baseline += ' << X{par_count} << ", " '.format(par_count = cnt)
+        return baseline
+
+
+class CallOut(object):
+
+    def __init__(self, name):
+        self.name = name
+        self.pre_code = ''
+        self.post_code = ''
+        self.global_code = ''
+        self.pre_flag = '0'
+        self.post_flag = '0'
+        self.pre_seq_code = ''
+        self.post_seq_code = ''
+
+    def initialize(self, dic):
+        if 'preflag' in dic:
+            self.pre_flag = dic.get('preflag')
+            if self.pre_flag in SEQUENCES.flags:
+                self.pre_seq_code = self.gen_seq_code(self.pre_flag)
+        if 'postflag' in dic:
+            self.post_flag = dic.get('postflag')
+            if self.post_flag in SEQUENCES.flags:
+                self.post_seq_code = self.gen_seq_code(self.post_flag)
+        if 'global' in dic:
+            self.global_code = dic.get('global')
+        if 'pre' in dic:
+            self.pre_code = dic.get('pre')
+        if 'post' in dic:
+            self.post_code = dic.get('post')
+
+    def gen_seq_code(self, flag):
+        src_code = []
+        if SEQUENCES.accepts(flag):
+            src_code.append('int retval = fast_push_code({0});'.format(flag))
+            src_code.append('    switch(retval)')
+            src_code.append('    {')
+            src_code.append(SEQUENCES.get_accept_code(flag))
+            src_code.append('    }')
         else:
-            if 0 == 1:
-                print "ODD LINE: %s"%line
-    return routine_data;
+            src_code.append('fast_push_code({0});'.format(flag))
+        return '\n'.join(src_code)
 
-def study_parameters( V ):
-    retval = [];
+def get_func_signatures(input_file):
+    routine_data = []
+    with open(input_file) as fin:
+        cur_routine=None
+        record = 0
+        for line in fin:
+            dec_ret_type, ws, dec_func_name_args = line.rstrip().partition(' ')
+            if dec_func_name_args:
+                routine_data.append( [dec_ret_type, dec_func_name_args] )
+            else:
+                if 0 == 1:
+                    print "ODD LINE: %s"%line
+    return routine_data
+
+def split_signatures(func_sigs):
+    retval = []
     try:
-        for v in V:
-            function = v[1];
-            function_stub, _, function_para = function.partition('(');
-            retval.append( [ v[0], function_stub, function_para.replace( "(", "" ).replace(")","").replace(";","").split( "," ) ] );
+        for signature in func_sigs:
+            func = signature[1]
+            func_stub, _, func_para = func.partition('(')
+            retval.append( [ signature[0], func_stub, func_para.replace( "(", "" ).replace(")","").replace("","").split( "," ) ] )
     except TypeError:
         pass
-    return retval;
+    return retval
 
-def gen_hook_calls( W , extra=None):
-    global MAX_FLAG_LEN
-    retval = []; functions_matched = {}; GLOBALS = ''; functions_listed = {}; flag_check = {};
-    for function_rv, function_stub, function_param in W:
-        # TODO render args ...
-        if not function_stub in functions_listed.keys():
-            functions_listed[ function_stub ] =0 ;
-        functions_listed[ function_stub ] += 1  ; # TODO error detection technqiue to be added (all values should be 1 ).
-        param_ns = []; vals=[];
-        NEWPRESTUFF = "";
-        NEWPOSTSTUFF= "";
-        GLOBALSTUFF ="";
-        PREFLAG = 0
-        POSTFLAG = 0
-        PRE_SEQ_CODE = ""
-        POST_SEQ_CODE = ""
-        if extra and (function_stub in extra.keys()):
-            if ( 'pre' in extra[function_stub].keys() ):
-                NEWPRESTUFF = extra[function_stub]['pre']
-            if ( 'post' in extra[function_stub].keys() ):
-                NEWPOSTSTUFF = extra[function_stub]['post']
-            if ( 'global' in extra[function_stub].keys() ):
-                GLOBALSTUFF = extra[function_stub]['global'];
-            preflag = extra[function_stub].get('preflag')
-            postflag = extra[function_stub].get('postflag')
-            if preflag and postflag:
-                if preflag not in flag_check:
-                    flag_check[preflag]=0
-                else:
-                    print>>sys.stderr, "Duplicate flag detected: " + str(preflag)
-                if postflag not in flag_check:
-                    flag_check[postflag]=0
-                else:
-                    print>>sys.stderr, "Duplicate flag detected: " + str(postflag)
-                flag_check[preflag] += 1
-                flag_check[postflag] += 1
-                PREFLAG = str(preflag)
-                PRE_SEQ_CODE = SEQ_APP.format(flag=PREFLAG, flag_len=MAX_FLAG_LEN)
-                POSTFLAG = str(postflag)
-                POST_SEQ_CODE = SEQ_APP.format(flag=POSTFLAG, flag_len=MAX_FLAG_LEN)
-            functions_matched[function_stub] = 1;
-        c = 0;
-        for v in function_param:
-            #param_ns.append( "%s X%s "%("WINDOWS::"+v.strip().split()[0],c));
-            param_ns.append( "%s X%s "%("void *",c));
-            vals.append( "X%s"%c );
-            c=c+1;
-        print_string = "hex " + "<< \",\"".join ( [ "<<%s"%v for v in vals] )
-        pre_hook = PREHOOK%( function_stub, ",".join( param_ns ), function_stub, ",".join ( function_param ), print_string , NEWPRESTUFF, PRE_SEQ_CODE) 
-        post_hook = POSTHOOK%(function_stub  , function_stub, ",".join ( function_param ), NEWPOSTSTUFF, POST_SEQ_CODE)
-        inject_pre = INJECT_INST_1%(function_stub, function_stub, function_stub) + "".join( [ INJECT_INST_2%k for k in range( len( function_param ))] ) + INJECT_INST_3; 
-        inject_post = INJECT_INST_4%(function_stub, function_stub, function_stub)
-        retval.append( [ pre_hook, post_hook, inject_pre, inject_post ] );
-        GLOBALS += GLOBALSTUFF;
-    return [retval, GLOBALS];
+def gen_callout(func_stub):
+    callout = CallOut(func_stub)
+    cout_conf = CALLOUTS.get(func_stub)
+    if cout_conf:
+        callout.initialize(cout_conf)
+    return callout
 
-def study_enhancments( file_path ):
-    RV = {};
-    f = open( file_path, "r" );
-    T = f.read();
-    RV = eval( T );
-    f.close();
-    return RV;
+def gen_hook_code(hook, callout):
+    h_code = PREHOOK.format(func_name = hook.func_name,
+                params = hook.formals,
+                doc_params = hook.doc_params,
+                baseline = hook.baseline,
+                callout_code = callout.pre_code,
+                sequence_code = callout.pre_seq_code)
+    h_code += POSTHOOK.format(func_name = hook.func_name,
+                doc_params = hook.doc_params,
+                callout_code = callout.post_code,
+                sequence_code = callout.post_seq_code)
+    return h_code
 
-def get_regex(line):
-    try:
-        re.compile(line)
-    except re.error:
-        sys.stderr.write("Invalid regex in extras input.SEQUENCES: " + line + '\n')
-        return ""
+def gen_analysis(func_sigs):
+    hook_conditions = []
+
+    hook_conditions.append(GENERATED_HDR)
+
+    for func_rv, func_stub, func_params in func_sigs:
+        inject_args = "".join( [ INJECT_FUNCARG.format(count=cnt) for cnt in range(len(func_params)) ] )
+        hook_conditions.append(INJECT_INST.format(func_name = func_stub, func_args = inject_args))
+
+    hook_conditions.append(GENERATED_FTR)
+    return hook_conditions
+
+def gen_instrumentation(func_sigs): 
+    capt_hook = []
+    global_code = []
+
+    capt_hook.append(GENERATED_HDR)
+    global_code.append(GENERATED_HDR)
+
+    for func_rv, func_stub, func_params in func_sigs:
+        hook = Hook(func_stub, func_params)
+        callout = gen_callout(func_stub)
+
+        # Generate the code for pre/post hook functions
+        hook_code = gen_hook_code(hook, callout)
+
+        # Add generated code to lists
+        global_code.append(callout.global_code)
+        capt_hook.append(hook_code)
+
+    capt_hook.append(GENERATED_FTR)
+    global_code.append(GENERATED_FTR)
+
+    return capt_hook, global_code
+
+def process(out, rtn, ins, img, split):
+    func_sigs = get_func_signatures(rtn)
+    func_sigs = split_signatures(func_sigs)
+    analysis = gen_analysis(func_sigs)
+    instrumentation, global_code = gen_instrumentation(func_sigs)
+
+    global_code = "".join(global_code)
+    analysis = "".join(analysis)
+    instrumentation = "".join(instrumentation)
+    sequences = SEQ_TEMPLATE.format(p_num=SEQUENCES.p_num, lengths=SEQUENCES.get_lengths(), windows=SEQUENCES.get_windows(), cases=SEQUENCES.get_dfa())
+
+    if split:
+        i_file = out + "_instrument.cpp"
+        a_file = out + "_analysis.cpp"
+        with open( i_file, "w" ) as fout:
+            fout.write( instrumentation )
+            print "Wrote file:",  i_file
+        with open( a_file, "w" ) as fout:
+            fout.write( analysis )
+            print "Wrote file:",  a_file
+        source_code = TOOL_TEMPLATE.format(g_code=global_code, log_name=out, i_code='#include "{f}"'.format(f=i_file), a_code='#include "{f}"'.format(f=a_file), seq_code=sequences)
     else:
-        return line
+        source_code = TOOL_TEMPLATE.format(g_code=global_code, log_name=out, i_code=instrumentation, a_code=analysis, seq_code=sequences)
 
-def get_suffix(line):
-    if line.isdigit():
-        return line
-    else:
-        sys.stderr.write("Invalid suffix length in extras input.SEQUENCES: " + line + '\n')
-        return ""
+    with open(out + ".cpp" , "w" ) as fout:
+        fout.write(source_code)
+        print "Wrote file:",out+".cpp"
 
-def get_code(start, lines):
-    stop = len(lines)
-    code = ""
-    for idx in range(start, stop):
-        if lines[idx].lower().startswith('else:') or lines[idx].lower().startswith('sequence:'):
-            return code
-        code = '\n\t'.join( [code, lines[idx]] )
-    return code
-
-def create_sequences(seq_lines):
-    global MAX_FLAG_LEN
-    tuples = []
-    template = templates.SEQ_SUFFIX_SEARCH
-    state = 0
-        
-    for idx, line in enumerate(seq_lines):
-        if line.startswith('//') or not line or line.startswith(' '):
-            continue
-        elif line.startswith('sequence:'):
-            state = 1
-        elif state == 1:
-            re = get_regex(seq_lines[idx])
-            tuples.append( [re, '', '', ''] )
-            state = 2
-        elif state == 2:
-            suff_len = get_suffix(seq_lines[idx])
-            tuples[-1][1] = str(int(suff_len) * MAX_FLAG_LEN)
-            state = 3
-        elif state == 3:
-            true_code = get_code(idx, seq_lines)
-            tuples[-1][2] = true_code
-            state = 4
-        elif line.startswith('else:'):
-            if state == 4:
-                false_code = get_code(idx+1, seq_lines)
-                tuples[-1][3] = false_code
-                state = 0
-            else:
-                sys.stderr.write('Dangling else in extras input SEQUENCES\n')
-        
-    result = ''
-    for if_strings in tuples:
-        result += template%tuple(if_strings)
-        
-    return result
-
-def get_longest_flag(callouts):
-    global MAX_FLAG_LEN
-    for func_name in callouts:
-        callout = callouts.get(func_name)
-        longest = max( len(str(callout.get('preflag'))), len(str(callout.get('postflag'))) )
-        if longest > MAX_FLAG_LEN:
-            MAX_FLAG_LEN = longest
-    MAX_FLAG_LEN += 1
-    print MAX_FLAG_LEN
-
-def process( arg, rtn=None, ins=None, img=None, extra=None, split_files=True ):
-    global MAX_FLAG_LEN
-    argstub = arg.partition('.')[0]
-    X = None;
-    if rtn:
-        X = study_c_declaration( rtn );
-
-    try:
-        extras = __import__(extra)
-    except ImportError as err:
-        seq_checks = ""
-        Y = None
-        print repr(err)
-    except TypeError as err:
-        if not extra:
-            seq_checks = ""
-            Y = None
-        else:
-            print repr(err)
-            sys.exit(1)
-    else:
-        Y = extras.CALLOUTS
-        get_longest_flag(Y)
-        if MAX_FLAG_LEN > 24:
-            sys.stderr.write('Callout flag exceeds 24 character limit.\n')
-            sys.exit(-1)
-        try:
-            seq_checks = create_sequences(extras.SEQUENCES.split('\n'))
-        except AttributeError:
-            seq_checks = ""
-
-    V = study_parameters( X )
-    # EGLOBALS inclues precompiler directives and compilable c code.
-    W,EGLOBALS = gen_hook_calls( V , extra = Y );
-    A=[]; B=[]; 
-    for a,b,c,d in W:
-        A.append( a + b );
-        B.append( c + d );
-    rtn_instrumentation = "".join( A );
-    rtn_merge_code = "".join( B );
-    target_code_file = TEMPLATE_p1%(str(MAX_FLAG_LEN), seq_checks) + EGLOBALS + TEMPLATE_p1a%argstub + "".join( A ) + TEMPLATE_p2 + "".join( B ) + TEMPLATE_p3;
-    if ( split_files ):
-        inst_file = argstub + "_rtn_inst.cpp"
-        rtn_file = argstub + "_rtn_merge_code.cpp"
-        fout = open( inst_file, "w" );
-        fout.write( rtn_instrumentation );
-        fout.close();
-        print "wrote file: ",  inst_file
-        fout = open( rtn_file, "w" );
-        fout.write( rtn_merge_code );
-        fout.close();
-        print "wrote file: ",  rtn_file
-        target_code_file = TEMPLATE_p1 + EGLOBALS + TEMPLATE_p1a%argstub + "#include \"%s_rtn_inst.cpp\""%argstub  + TEMPLATE_p2 + "#include \"%s_merge_code.cpp\""%argstub + TEMPLATE_p3;
-    fout = open(argstub + ".cpp" , "w" );
-    fout.write( target_code_file );
-    fout.close();
-
-def main():
-    # parse command line options
-    RTN_INPUT = None
-    INS_INPUT = None
-    IMAGE_INPUT = None
-    EXTRA_INPUT = None
-    SPLIT_FILES = False
-    try:
-        opts, args = getopt.getopt(sys.argv[1:], "hsR:I:M:e:", ["help", "split", "routine", "instructions", "image", "extra"])
-    except getopt.error, msg:
-        print msg
-        print "for help use --help"
-        sys.exit(2)
-    # process options 
-    for o, a in opts:
-        if o in ("-h", "--help"):
-            print __doc__
-            sys.exit(0)
-        if o in ("-R", "--routine"):
-            # specify the rtn hooks.
-            RTN_INPUT = a;
-        if o in ("-I", "--instructions"):
-            # specify the ins hooks.
-            INS_INPUT = a;
-        if o in ("-M", "--image"):
-            # specify the image hooks.
-            IMAGE_INPUT = a;
-        if o in ("-e", "--extra"):
-            # specify the rtn hooks.
-            EXTRA_INPUT = a.partition('.')[0];
-        if o in ("-s", "--split"):
-            SPLIT_FILES = True
-    # process arguments
-    if ( len( args ) != 1 ):
-        print __doc__
-        sys.exit( 3 );
-    process( args[0], rtn=RTN_INPUT, ins=INS_INPUT, img=IMAGE_INPUT, extra=EXTRA_INPUT, split_files = SPLIT_FILES );
+def get_args(cmd_line):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-e', '--extras', default=None, help='File with callouts and sequences')
+    parser.add_argument('--img', default=None, help='Image hooks')
+    parser.add_argument('--inst', default=None, help='File containing instructions to hook')
+    parser.add_argument('-o', '--out', default='TMP', help='Output file name. Default: TMP.cpp')
+    parser.add_argument('-r', '--rtn', default=None, help='File containing list of prototypes for funcs/routines to watch in trace')
+    parser.add_argument('-s', '--split', default=False, action='store_true', help='Split output files into separate source code files')
+    parser.add_argument('-t', '--templates', default='templates', help='Py module containing templated code')
+    retval = parser.parse_args(cmd_line)
+    retval.out = retval.out.partition('.')[0]
+    return retval
 
 if __name__ == "__main__":
-    main()
+    args = get_args(sys.argv[1:])
+    try:
+        extras = __import__(args.extras.partition('.py')[0])
+    except ImportError as err:
+        print 'Error importing extras module'
+        repr(err)
+        sys.exit(1)
+    except AttributeError as err:
+        pass
+    else:
+        CALLOUTS = extras.CALLOUTS
+        SEQUENCES = Sequences(extras.SEQUENCES)
+        SEQUENCES.init_DFA()
+        SEQUENCES.init_accepts()
+
+    try:
+        templates = __import__(args.templates.partition('.py')[0])
+    except ImportError as err:
+        print 'Error importing templated code file'
+        repr(err)
+        sys.exit(1)
+    else:
+        PREHOOK=templates.PREHOOK
+        POSTHOOK=templates.POSTHOOK
+        TOOL_TEMPLATE=templates.TOOL_TEMPLATE
+        SEQ_TEMPLATE=templates.SEQUENCE_TEMPLATE
+        INJECT_INST=templates.INJECT_INST
+        INJECT_FUNCARG = templates.INJECT_FUNCARG
+
+    process(args.out, args.rtn, args.inst, args.img, args.split)
