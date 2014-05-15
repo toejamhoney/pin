@@ -47,21 +47,21 @@ CALLOUTS = { 'DbgPrintEx' : {
         'preflag': 4,
         'postflag': -4,
         'global': 'char NEW_FILENAME[]="MaliciousFile.txt";',
-        'pre':'\n\t'.join( [ 'TraceFile << "CALL-OUT ENTER <ACTION: OPEN-FILE>: " << name << " ( path=" << hex << (char *)X0 << ", mode=" << (char*)X1 << ")" << dec << endl;' ] ),
+        'pre':'\n\t'.join( [ 'TraceFile << "CALL-OUT ENTER <ACTION: OPEN-FILE>: " << name << " ( path=" << hex << (char *)*X0 << ", mode=" << (char*)*X1 << ")" << dec << endl;' ] ),
         'post':'\n\t'.join( [ 'TraceFile << "CALL-OUT EXIT: "<< name << " RETURN-VALUE @:" << hex << ret << dec << " RETURN-VALUE-INTERP:" << dec << ((int) ret) << endl;', ] )
         },
     'printf' : {
         'preflag': 5,
         'postflag': -5,
         'global':'',
-        'pre': '\n\t'.join( ['TraceFile << "CALL-OUT ENTER <ACTION: PRINT>: " << name << " (" << hex << (char *)X0 << "," << X1 << ")" << dec << endl;', ] ),
+        'pre': '\n\t'.join( ['TraceFile << "CALL-OUT ENTER <ACTION: PRINT>: " << name << " (" << hex << (char *)*X0 << "," << *X1 << ")" << dec << endl;', ] ),
         'post': '\n\t'.join( ['TraceFile << "CALL-OUT EXIT: " << name << " RETURN-VALUE @: " << hex << ret << dec << " RETURN-VALUE-INTERP: " << dec << ((int) ret) << endl;', ] )
         },
     'fclose' : {
         'preflag': 6,
         'postflag': -6,
         'global':'',
-        'pre':'\n\t'.join( [ 'TraceFile << "CALL-OUT ENTER <ACTION: CLOSE-FILE>: " << name << " ( path=" << hex << (char *)X0 << ")" << dec << endl;' ] ),
+        'pre':'\n\t'.join( [ 'TraceFile << "CALL-OUT ENTER <ACTION: CLOSE-FILE>: " << name << " ( path=" << hex << (char *)*X0 << ")" << dec << endl;' ] ),
         'post':'\n\t'.join( ['TraceFile << "CALL-OUT EXIT: " << name << " RETURN-VALUE @: " << hex << ret << dec << " RETURN-VALUE-INTERP: " << dec << ((int) ret) << endl;', ] )
     },
 }
